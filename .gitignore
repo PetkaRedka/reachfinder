@@ -1,0 +1,28 @@
+# Среда разработки
+.venv/
+__pycache__/
+*.py[cod]
+
+# Артефакты тестов и сборки
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Результаты работы инструмента и кэш исходников
+reachfinder_output/
+.reachfinder_cache/
+*.mmd
+
+# Примеры проектов: сборочные артефакты и кэши
+node_modules/
+test_projects/**/obj/
+test_projects/**/bin/
+test_projects/**/target/
+test_projects/**/dist/
+test_projects/**/build/
+test_projects/**/*.egg-info/
+test_projects/**/localfeed/
+test_projects/**/.reachfinder_cache/
+test_projects/*_out/

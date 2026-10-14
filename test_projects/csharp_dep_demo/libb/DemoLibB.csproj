@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PackageId>DemoLibB</PackageId>
+    <Version>1.0.0</Version>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="DemoLibC" Version="1.0.0" />
+    <None Include="Mid.cs" Pack="true" PackagePath="src/" />
+  </ItemGroup>
+
+</Project>

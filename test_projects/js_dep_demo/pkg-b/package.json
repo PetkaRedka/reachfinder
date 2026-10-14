@@ -1,0 +1,8 @@
+{
+  "name": "pkg-b",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "pkg-c": "file:../pkg-c"
+  }
+}

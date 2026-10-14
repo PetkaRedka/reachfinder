@@ -1,0 +1,2 @@
+[requires]
+demoa/1.0
