@@ -35,8 +35,10 @@ def test_reachability_report_roundtrip() -> None:
         ecosystem="python",
         package="requests",
         function="get",
+        mode="package",
         reachable=True,
         target_nodes=[NodeRef(node_id="requests.api:get", name="get", kind="function")],
+        reachable_targets=[NodeRef(node_id="requests.api:get", name="get", kind="function")],
         entrypoint_paths=[
             EntryPointPath(
                 entrypoint=NodeRef(node_id="app:main", name="main"),
@@ -55,9 +57,11 @@ def test_reachability_report_roundtrip() -> None:
     )
 
     restored = ReachabilityReport.from_dict(report.to_dict())
+    assert restored.mode == "package"
     assert restored.reachable is True
     assert restored.diagnosis == "reachable"
     assert restored.target_nodes[0].name == "get"
+    assert restored.reachable_targets[0].name == "get"
     assert len(restored.entrypoint_paths) == 1
     assert restored.dependencies[0].name == "requests"
     assert restored.stats["packages"] == 3

@@ -1,12 +1,12 @@
 """Поставщик исходников для экосистем JavaScript/TypeScript (npm).
 
-Closure берётся из ``package-lock.json``. Реестровые пакеты разрешаются по
-локфайлу (в closure уже есть все транзитивы), а локальные пакеты (``file:``
+Closure берётся из package-lock.json. Реестровые пакеты разрешаются по
+локфайлу (в closure уже есть все транзитивы), а локальные пакеты (file:
 или ссылки) npm не раскрывает в локфайле — поэтому такие зависимости
-обходятся рекурсивно по их ``package.json``. При отсутствии npm-локфайла
-поддерживаются ``pnpm-lock.yaml``/``yarn.lock`` (реестровые пакеты).
+обходятся рекурсивно по их package.json. При отсутствии npm-локфайла
+поддерживаются pnpm-lock.yaml/yarn.lock (реестровые пакеты).
 
-Исходники реестрового пакета скачиваются командой ``npm pack <имя>@<версия>``;
+Исходники реестрового пакета скачиваются командой npm pack <имя>@<версия>;
 локальный пакет копируется из своего каталога.
 """
 
@@ -21,9 +21,30 @@ from typing import Any, ClassVar
 from reachfinder._cache import PkgCache
 from reachfinder._languages import JS_ECOSYSTEM
 from reachfinder._models import ClosureGraph, DependencyCoordinate
-from reachfinder._sources import SourceError, SourceProvider, extract_archive
+from reachfinder._sources import (
+    SourceError,
+    SourceProvider,
+    cached_scip_index,
+    extract_archive,
+    resolve_tool,
+)
 
 _FILE_PREFIX = "file:"
+
+# Временный tsconfig для проектов без своего конфига: включает JS/TS и
+# заставляет scip-typescript разрешать вызовы в зависимостях.
+_TSCONFIG_TEMPLATE = """{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "moduleResolution": "node"
+  },
+  "include": ["**/*.js", "**/*.cjs", "**/*.mjs", "**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules", ".reachfinder_cache", "build", "dist"]
+}
+"""
+_TSCONFIG_NAME = "tsconfig.reachfinder.json"
 
 
 class JsSourceProvider(SourceProvider):
@@ -34,7 +55,7 @@ class JsSourceProvider(SourceProvider):
 
     def __init__(self, cache: PkgCache) -> None:
         super().__init__(cache)
-        #: локальные пакеты (``file:``/link): имя → абсолютный каталог.
+        #: локальные пакеты (file:/link): имя → абсолютный каталог.
         self._local_packages: dict[str, str] = {}
 
     # ------------------------------------------------------------------
@@ -181,6 +202,49 @@ class JsSourceProvider(SourceProvider):
 
     # ------------------------------------------------------------------
 
+    def build_scip_index(
+        self,
+        project_root: str,
+        coordinates: list[DependencyCoordinate],
+        cache_root: str,
+    ) -> str | None:
+        """Построить SCIP-индекс JS/TS (scip-typescript).
+
+        Индексёр анализирует проект вместе с node_modules, поэтому
+        зависимости должны быть установлены. Для проектов без tsconfig.json
+        используется --infer-tsconfig. Если инструмент недоступен или
+        индексация не удалась, возвращается None (name-based резолв).
+        """
+        tool = resolve_tool(
+            "scip-typescript",
+            (os.fspath(Path(os.environ.get("APPDATA", "")) / "npm"),),
+        )
+        if tool is None:
+            return None
+
+        def build(out_path: Path) -> bool:
+            existing = next(
+                (
+                    Path(project_root) / name
+                    for name in ("tsconfig.json", "jsconfig.json")
+                    if (Path(project_root) / name).is_file()
+                ),
+                None,
+            )
+            if existing is not None and _run_index(self, tool, existing, out_path, project_root):
+                return True
+            # Своего рабочего конфига нет (или он не покрывает JS-файлы):
+            # используем временный tsconfig с allowJs/checkJs.
+            out_path.unlink(missing_ok=True)
+            config = Path(project_root) / _TSCONFIG_NAME
+            config.write_text(_TSCONFIG_TEMPLATE, encoding="utf-8")
+            try:
+                return _run_index(self, tool, config, out_path, project_root)
+            finally:
+                config.unlink(missing_ok=True)
+
+        return cached_scip_index(cache_root, project_root, build)
+
     def fetch(self, coord: DependencyCoordinate) -> Path:
         if self._cache.has(coord):
             return self._cache.source_dir(coord)
@@ -206,8 +270,31 @@ class JsSourceProvider(SourceProvider):
             return self._cache.install(coord, source_dir)
 
 
+def _run_index(
+    provider: SourceProvider,
+    tool: str,
+    config: Path,
+    out_path: Path,
+    project_root: str,
+) -> bool:
+    """Запустить scip-typescript index с явным конфигом."""
+    proc = provider.run(
+        [
+            tool,
+            "index",
+            os.fspath(config),
+            "--no-progress-bar",
+            "--output",
+            os.fspath(out_path),
+        ],
+        project_root,
+        timeout=3600,
+    )
+    return proc.returncode == 0 and out_path.is_file()
+
+
 def _read_package_json(directory: Path) -> dict[str, Any]:
-    """Прочитать ``package.json`` каталога (пустой словарь при ошибке)."""
+    """Прочитать package.json каталога (пустой словарь при ошибке)."""
     path = directory / "package.json"
     if not path.is_file():
         return {}

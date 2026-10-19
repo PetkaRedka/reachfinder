@@ -1,9 +1,9 @@
 """Кэш распарсенных графов trailmark на диске.
 
-Графы сериализуются через ``pickle`` (внутренний локальный кэш: быстро и без
+Графы сериализуются через pickle (внутренний локальный кэш: быстро и без
 потерь) и ключуются по экосистеме и отпечатку исходников. Отпечаток учитывает
 пути, размеры и mtime файлов, чтобы изменения локальных пакетов инвалидировали
-кэш. Записи переписываются атомарно (временный файл + ``os.replace``).
+кэш. Записи переписываются атомарно (временный файл + os.replace).
 """
 
 from __future__ import annotations
@@ -20,13 +20,18 @@ _MAGIC = b"reachfinder-graph-v1"
 
 
 def fingerprint(source_dir: str, exclude: set[str] | None = None) -> str:
-    """Лёгкий отпечаток каталога исходников (пути + размер + mtime).
+    """Лёгкий отпечаток каталога исходников (абсолютный корень + пути + размер + mtime).
 
     :param exclude: абсолютные пути каталогов, исключаемых из отпечатка
         (например, кэш, лежащий внутри проекта).
     """
     digest = hashlib.sha256()
     root = Path(source_dir)
+    # Абсолютный путь входит в отпечаток: граф хранит абсолютные пути файлов,
+    # поэтому одинаковая по содержимому копия каталога в другом месте не должна
+    # переиспользовать чужой кэш (например, после запуска в Docker).
+    digest.update(os.path.normcase(os.path.abspath(source_dir)).encode("utf-8", "replace"))
+    digest.update(b"\x00")
     excluded = {os.path.normcase(os.path.abspath(p)) for p in (exclude or set())}
     for dirpath, dirnames, filenames in os.walk(source_dir):
         dirnames[:] = [
@@ -56,7 +61,7 @@ def graph_cache_path(cache_root: str, ecosystem: str, key: str) -> Path:
 
 
 def save_graph(path: Path, graph: CodeGraph) -> None:
-    """Сохранить граф атомарно (запись во временный файл + ``os.replace``)."""
+    """Сохранить граф атомарно (запись во временный файл + os.replace)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     with open(tmp, "wb") as fh:
@@ -65,7 +70,7 @@ def save_graph(path: Path, graph: CodeGraph) -> None:
 
 
 def load_graph(path: Path) -> CodeGraph | None:
-    """Загрузить граф из кэша (``None`` при отсутствии/повреждении)."""
+    """Загрузить граф из кэша (None при отсутствии/повреждении)."""
     if not path.is_file():
         return None
     try:

@@ -59,7 +59,7 @@ class Logger:
             self._logger.removeHandler(self._console_handler)
 
     def debug(self, *args: object) -> None:
-        """Запись уровня DEBUG (в консоль — только при ``verbose``)."""
+        """Запись уровня DEBUG (в консоль — только при verbose)."""
         with self._lock:
             if self._verbose:
                 self._console_log(logging.DEBUG, " ".join(map(str, args)))

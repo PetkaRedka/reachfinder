@@ -3,12 +3,12 @@
 Каждая экосистема пакетного менеджера реализуется отдельным поставщиком
 (:class:`SourceProvider`). Единый интерфейс из двух шагов:
 
-1. ``resolve_closure_graph`` — определить граф зависимостей (полный список
+1. resolve_closure_graph — определить граф зависимостей (полный список
    координат включая транзитивные + рёбра «пакет → прямые зависимости») из
    локфайлов проекта;
-2. ``fetch`` — скачать и распаковать исходники одной координаты в кэш.
+2. fetch — скачать и распаковать исходники одной координаты в кэш.
 
-Метод ``resolve_closure`` — тонкая обёртка над ``resolve_closure_graph``,
+Метод resolve_closure — тонкая обёртка над resolve_closure_graph,
 возвращающая только список координат (DRY).
 
 Общие операции (запуск внешних команд, распаковка архивов, загрузка по URL)
@@ -24,10 +24,12 @@ import tarfile
 import urllib.request
 import zipfile
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 
 from reachfinder._cache import PkgCache
+from reachfinder._graph_cache import fingerprint
 from reachfinder._models import ClosureGraph, DependencyCoordinate
 
 
@@ -38,11 +40,11 @@ class SourceError(RuntimeError):
 class SourceProvider(ABC):
     """Интерфейс поставщика исходников для одной экосистемы."""
 
-    #: Имя экосистемы (см. ``reachfinder._languages``).
+    #: Имя экосистемы (см. reachfinder._languages).
     ecosystem: ClassVar[str]
     #: Первичное имя языка trailmark для парсинга исходников.
     trailmark_language: ClassVar[str]
-    #: Таймаут команд по умолчанию (сек), переопределяется флагом ``--timeout``.
+    #: Таймаут команд по умолчанию (сек), переопределяется флагом --timeout.
     default_timeout: ClassVar[int] = 600
 
     def __init__(self, cache: PkgCache) -> None:
@@ -61,6 +63,27 @@ class SourceProvider(ABC):
     def fetch(self, coord: DependencyCoordinate) -> Path:
         """Скачать и распаковать исходники координаты; вернуть каталог в кэше."""
 
+    def fetch_extra_sources(self, coord: DependencyCoordinate) -> Path | None:
+        """Дополнительный источник для пакета (например, git-репозиторий).
+
+        Вызывается только для целевого пакета, если в штатных исходниках нет
+        кода на нужном языке (например, NuGet-пакет только с DLL).
+        """
+        return None
+
+    def build_scip_index(
+        self,
+        project_root: str,
+        coordinates: list[DependencyCoordinate],
+        cache_root: str,
+    ) -> str | None:
+        """Построить SCIP-индекс для точного резолва вызовов.
+
+        Возвращает путь к .scip-файлу или None, если экосистема/инструмент
+        индексирования недоступны (тогда используется name-based резолв).
+        """
+        return None
+
     # ------------------------------------------------------------------
     # Утилиты для наследников
     # ------------------------------------------------------------------
@@ -73,10 +96,10 @@ class SourceProvider(ABC):
     ) -> subprocess.CompletedProcess[str]:
         """Запустить внешнюю команду и вернуть её результат.
 
-        Исполняемый файл резолвится через ``shutil.which``, что на Windows
-        позволяет находить ``npm``/``mvn`` (это ``.cmd``-обёртки, а не ``.exe``).
+        Исполняемый файл резолвится через shutil.which, что на Windows
+        позволяет находить npm/mvn (это .cmd-обёртки, а не .exe).
 
-        :param timeout: таймаут в секундах (по умолчанию ``default_timeout``).
+        :param timeout: таймаут в секундах (по умолчанию default_timeout).
         :raises SourceError: если исполняемый файл не найден.
         """
         if timeout is None:
@@ -105,6 +128,10 @@ class SourceProvider(ABC):
             )
         except FileNotFoundError as exc:  # pragma: no cover — защитная ветка
             raise SourceError(f"Не удалось запустить '{tool}': {exc}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise SourceError(
+                f"Команда '{tool}' превысила таймаут {timeout} с и была прервана."
+            ) from exc
 
     @staticmethod
     def require_success(
@@ -123,9 +150,9 @@ class SourceProvider(ABC):
 
 
 def extract_archive(archive_path: Path, dest_dir: Path) -> None:
-    """Распаковать ``.tar.gz``/``.tgz``/``.tar`` или zip-подобные архивы.
+    """Распаковать .tar.gz/.tgz/.tar или zip-подобные архивы.
 
-    К zip-подобным относятся ``.zip``, ``.whl`` (Python wheel) и ``.nupkg``
+    К zip-подобным относятся .zip, .whl (Python wheel) и .nupkg
     (.NET) — все они являются ZIP-контейнерами.
     """
     name = archive_path.name.lower()
@@ -133,7 +160,7 @@ def extract_archive(archive_path: Path, dest_dir: Path) -> None:
     if name.endswith((".tar.gz", ".tgz", ".tar")):
         with tarfile.open(archive_path, "r:*") as tf:
             tf.extractall(dest_dir, filter="data")
-    elif name.endswith((".zip", ".whl", ".nupkg")):
+    elif name.endswith((".zip", ".whl", ".nupkg", ".jar")):
         with zipfile.ZipFile(archive_path) as zf:
             for member in zf.infolist():
                 if not _is_safe_member(member.filename):
@@ -148,8 +175,8 @@ def extract_archive(archive_path: Path, dest_dir: Path) -> None:
 def _is_safe_member(name: str) -> bool:
     """Безопасен ли путь члена архива (защита от zip-slip).
 
-    Отклоняются пустые имена, NUL, абсолютные пути (``/...``, ``C:/...``) и
-    имена с компонентом ``..``.
+    Отклоняются пустые имена, NUL, абсолютные пути (/..., C:/...) и
+    имена с компонентом ...
     """
     if not name or "\x00" in name:
         return False
@@ -176,6 +203,61 @@ def download_url(url: str, dest_path: Path) -> Path:
     except Exception as exc:  # noqa: BLE001 — оборачиваем любую сетевую ошибку
         raise SourceError(f"Не удалось скачать {url}: {exc}") from exc
     return dest_path
+
+
+# ---------------------------------------------------------------------------
+# Кэширование SCIP-индексов
+# ---------------------------------------------------------------------------
+
+
+def cached_scip_index(
+    cache_root: str,
+    project_root: str,
+    build: Callable[[Path], bool],
+) -> str | None:
+    """Вернуть путь к закэшированному SCIP-индексу, построив его при необходимости.
+
+    Отпечаток проекта (содержимое файлов) исключает cache_root, чтобы кэш
+    индексов не влиял на собственный ключ.
+    """
+    out_dir = Path(cache_root) / "scip"
+    key = fingerprint(project_root, {cache_root})
+    out_path = out_dir / f"{key}.scip"
+    if _has_content(out_path):
+        return os.fspath(out_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ok = build(out_path)
+    if ok and _has_content(out_path):
+        return os.fspath(out_path)
+    # Пустой/частичный индекс не кэшируем: иначе следующие запуски не пересоберут его.
+    out_path.unlink(missing_ok=True)
+    return None
+
+
+def _has_content(path: Path) -> bool:
+    """Есть ли в файле непустое содержимое."""
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def resolve_tool(name: str, extra_dirs: tuple[str, ...] = ()) -> str | None:
+    """Найти исполняемый файл инструмента в PATH или в известных каталогах.
+
+    extra_dirs нужны для глобальных tool-менеджеров (например,
+    ~/.dotnet/tools), которые не всегда попадают в PATH.
+    """
+    found = shutil.which(name)
+    if found is not None:
+        return found
+    suffixes = (".cmd", ".exe", "") if os.name == "nt" else ("",)
+    for directory in extra_dirs:
+        for suffix in suffixes:
+            candidate = Path(directory) / f"{name}{suffix}"
+            if candidate.is_file():
+                return os.fspath(candidate)
+    return None
 
 
 # ---------------------------------------------------------------------------

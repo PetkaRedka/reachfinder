@@ -33,7 +33,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     reach.add_argument("--project", required=True, help="Путь к исходному коду проекта")
     reach.add_argument("--package", required=True, help="Имя пакета-зависимости")
-    reach.add_argument("--function", required=True, help="Имя функции или метода (Class.method)")
+    reach.add_argument(
+        "--function",
+        default=None,
+        help=(
+            "Имя функции или метода (Class.method). Если не задано, проверяется "
+            "достижимость любого кода пакета."
+        ),
+    )
     reach.add_argument(
         "--language",
         default="auto",
@@ -118,7 +125,10 @@ def _cmd_reach(args: argparse.Namespace) -> None:
     cache_dir = args.cache_dir or os.path.join(project_root, ".reachfinder_cache")
 
     logger.print_console(f"Проект: {args.project}")
-    logger.print_console(f"Цель: {args.package} -> {args.function}")
+    target = f"{args.package} -> {args.function}" if args.function else args.package
+    logger.print_console(f"Цель: {target}")
+    if not args.function:
+        logger.print_console("Режим: любой код целевого пакета")
     logger.print_console(f"Язык: {args.language}")
 
     try:

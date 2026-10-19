@@ -77,6 +77,25 @@ def test_flat_graph_has_no_edges() -> None:
     assert graph.roots == ["a"]
 
 
+def test_merged_closure_deduplicates_and_unions() -> None:
+    first = ClosureGraph(
+        coords=[_coord("a"), _coord("b")],
+        edges={"a": ["b"]},
+        roots=["a"],
+    )
+    second = ClosureGraph(
+        coords=[_coord("c"), _coord("a")],
+        edges={"c": ["d"], "a": ["b", "c"]},
+        roots=["c"],
+    )
+
+    merged = ClosureGraph.merged([first, second])
+
+    assert [coord.name for coord in merged.coords] == ["a", "b", "c"]
+    assert merged.edges == {"a": ["b", "c"], "c": ["d"]}
+    assert merged.roots == ["a", "c"]
+
+
 # ---------------------------------------------------------------------------
 # Разбор локфайлов в граф (Python)
 # ---------------------------------------------------------------------------

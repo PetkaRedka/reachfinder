@@ -2,11 +2,11 @@
 
 Инструмент работает на стыке двух классификаций:
 
-1. **Язык trailmark** — имя парсера исходников (``python``, ``go``,
-   ``javascript``, ``typescript``, ``java``, ``c``, ``cpp``, ``c_sharp``).
+1. **Язык trailmark** — имя парсера исходников (python, go,
+   javascript, typescript, java, c, cpp, c_sharp).
 2. **Экосистема** — пакетный менеджер, которым скачиваются исходники
-   зависимостей (``python``→pip, ``go``→go modules, ``javascript``/
-   ``typescript``→npm, ``java``→maven, ``c_sharp``→nuget, ``c``/``cpp``→conan).
+   зависимостей (python→pip, go→go modules, javascript/
+   typescript→npm, java→maven, c_sharp→nuget, c/cpp→conan).
 """
 
 from __future__ import annotations

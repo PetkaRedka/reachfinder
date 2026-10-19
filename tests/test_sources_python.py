@@ -39,7 +39,9 @@ PIPFILE_LOCK = """\
     "requests": {"version": "==2.25.1"},
     "urllib3": {"version": "==1.26.5"}
   },
-  "develop": {}
+  "develop": {
+    "pylint": {"version": "==3.0.0"}
+  }
 }
 """
 
@@ -60,6 +62,7 @@ def test_parse_pipfile_lock(tmp_path: Path) -> None:
 
     coords = PythonSourceProvider._parse_pipfile_lock(lock)
 
+    # develop (dev-зависимости) в closure не попадает.
     assert {(c.name, c.version) for c in coords} == {("requests", "2.25.1"), ("urllib3", "1.26.5")}
 
 

@@ -1,8 +1,8 @@
 """Поставщик исходников для экосистемы Go (go modules).
 
-Полный closure модулей определяется командой ``go list -m all`` с шаблоном,
-выдающим путь, версию и каталог локальной замены (``replace``). Для обычных
-модулей исходники скачиваются ``go mod download -json`` в модульный кэш Go;
+Полный closure модулей определяется командой go list -m all с шаблоном,
+выдающим путь, версию и каталог локальной замены (replace). Для обычных
+модулей исходники скачиваются go mod download -json в модульный кэш Go;
 для модулей, заменённых на локальный каталог, используется сам этот каталог.
 Исходники копируются в локальный кэш reachfinder (модульный кэш Go трогать
 нельзя).
@@ -12,20 +12,22 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import ClassVar
 
 from reachfinder._cache import PkgCache
 from reachfinder._languages import GO_ECOSYSTEM
 from reachfinder._models import ClosureGraph, DependencyCoordinate
-from reachfinder._sources import SourceError, SourceProvider
+from reachfinder._scip import load_index, referenced_modules
+from reachfinder._sources import SourceError, SourceProvider, cached_scip_index
 
 # Путь | версия | каталог локальной замены (может быть пустым) | признак косвенной зависимости.
 _LIST_TEMPLATE = "{{.Path}}|{{.Version}}|{{with .Replace}}{{.Dir}}{{end}}|{{.Indirect}}"
 
 
 class GoSourceProvider(SourceProvider):
-    """Получение исходников Go-модулей через ``go``."""
+    """Получение исходников Go-модулей через go."""
 
     ecosystem: ClassVar[str] = GO_ECOSYSTEM
     trailmark_language: ClassVar[str] = "go"
@@ -70,7 +72,7 @@ class GoSourceProvider(SourceProvider):
         return ClosureGraph(coords=coords, edges=edges, roots=roots)
 
     def _module_edges(self, project_root: str) -> dict[str, list[str]]:
-        """Рёбра графа модулей из ``go mod graph`` (путь → прямые зависимости)."""
+        """Рёбра графа модулей из go mod graph (путь → прямые зависимости)."""
         proc = self.run(["go", "mod", "graph"], project_root)
         if proc.returncode != 0:
             return {}
@@ -115,7 +117,50 @@ class GoSourceProvider(SourceProvider):
         # Копируем, чтобы не трогать общий модульный кэш Go.
         return self._cache.install(coord, Path(os.path.normpath(module_dir)), move=False)
 
+    def build_scip_index(
+        self,
+        project_root: str,
+        coordinates: list[DependencyCoordinate],
+        cache_root: str,
+    ) -> str | None:
+        """Построить SCIP-индекс Go (scip-go), включая нужные зависимости.
+
+        Двухфазно: сначала индексируется только проект (быстро), затем — лишь те
+        модули, на символы которых проект реально ссылается (иначе индексирование
+        всего графа модулей непомерно долго). Индекс кэшируется по отпечатку проекта.
+        """
+        if shutil.which("scip-go") is None:
+            return None
+
+        def build(out_path: Path) -> bool:
+            base_path = out_path.with_suffix(".base.scip")
+            if not self._run_scip_go(project_root, [], base_path):
+                return False
+            names = {coord.name for coord in coordinates}
+            try:
+                referenced = referenced_modules(
+                    load_index(os.fspath(base_path), project_root), names
+                )
+            except (OSError, ValueError):
+                referenced = []
+            patterns = [f"{name}/..." for name in referenced]
+            if patterns and self._run_scip_go(project_root, patterns, out_path):
+                return True
+            # Фаза 2 не удалась — используем базовый индекс (только проект).
+            shutil.copyfile(base_path, out_path)
+            return True
+
+        return cached_scip_index(cache_root, project_root, build)
+
+    def _run_scip_go(self, project_root: str, patterns: list[str], out_path: Path) -> bool:
+        """Запустить scip-go index; вернуть успех."""
+        if out_path.is_file():
+            out_path.unlink()
+        cmd = ["scip-go", "index", "./...", *patterns, "-o", os.fspath(out_path)]
+        proc = self.run(cmd, project_root, timeout=3600)
+        return proc.returncode == 0 and out_path.is_file()
+
 
 def _module_path(ref: str) -> str:
-    """Выделить путь модуля из ссылки ``path@version`` (версия отбрасывается)."""
+    """Выделить путь модуля из ссылки path@version (версия отбрасывается)."""
     return ref.rsplit("@", 1)[0].strip()

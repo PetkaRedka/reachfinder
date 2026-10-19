@@ -9,8 +9,8 @@ from reachfinder._models import NodeRef
 def find_target_nodes(graph: CodeGraph, function: str, package_source_dir: str) -> list[CodeUnit]:
     """Найти узлы-кандидаты целевой функции внутри каталога исходников пакета.
 
-    Возвращает функции/методы, чей ``file_path`` лежит под ``package_source_dir``
-    и чьё имя/квалифицированное имя совпадает с ``function`` (см. ``_matches``).
+    Возвращает функции/методы, чей file_path лежит под package_source_dir
+    и чьё имя/квалифицированное имя совпадает с function (см. _matches).
     """
     # Нормализуем корень один раз, чтобы не вызывать abspath/normcase на каждый узел.
     norm_root = [normalize_path(package_source_dir)]
@@ -25,14 +25,31 @@ def find_target_nodes(graph: CodeGraph, function: str, package_source_dir: str) 
     return matches
 
 
+def find_package_nodes(graph: CodeGraph, package_source_dir: str) -> list[CodeUnit]:
+    """Все функции/методы, определённые в исходниках пакета.
+
+    Используется в режиме «любой код пакета» (когда конкретная функция не задана).
+    """
+    norm_root = [normalize_path(package_source_dir)]
+    matches: list[CodeUnit] = []
+    for node in graph.nodes.values():
+        if node.kind not in (NodeKind.FUNCTION, NodeKind.METHOD):
+            continue
+        if node.location is None or not is_under_any(node.location.file_path, norm_root):
+            continue
+        matches.append(node)
+    matches.sort(key=lambda node: (node.location.file_path, node.location.start_line, node.name))
+    return matches
+
+
 def _matches(function: str, node: CodeUnit) -> bool:
     """Совпадает ли имя узла с запрошенным именем функции.
 
     Поддерживаются формы:
 
-    * ``get`` — имя функции или метода;
-    * ``Class.method`` — метод конкретного класса;
-    * ``pkg.mod.func`` — квалифицированное имя (по последнему сегменту и
+    * get — имя функции или метода;
+    * Class.method — метод конкретного класса;
+    * pkg.mod.func — квалифицированное имя (по последнему сегменту и
       совпадению остатка с идентификатором узла).
     """
     if node.name == function:

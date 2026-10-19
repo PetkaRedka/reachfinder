@@ -13,7 +13,7 @@ from urllib.parse import quote
 def make_purl(ecosystem: str, name: str, version: str) -> str:
     """Собрать package-url (purl) для координаты зависимости.
 
-    Имена, содержащие ``/`` (пути Go-модулей, Maven-координаты ``group:artifact``),
+    Имена, содержащие / (пути Go-модулей, Maven-координаты group:artifact),
     кодируются по правилам purl, чтобы кэш-ключ оставался безопасным именем файла.
     """
     encoded_name = quote(name, safe="")
@@ -59,14 +59,14 @@ class DependencyCoordinate:
 class ClosureGraph:
     """Граф зависимостей проекта: координаты и рёбра «пакет → прямые зависимости».
 
-    Нужен для ограничения closure по глубине (флаг ``--package-depth``):
+    Нужен для ограничения closure по глубине (флаг --package-depth):
 
-    - ``coords`` — полный список зависимостей (включая транзитивные);
-    - ``edges`` — имя пакета → имена его прямых зависимостей (по имени в
+    - coords — полный список зависимостей (включая транзитивные);
+    - edges — имя пакета → имена его прямых зависимостей (по имени в
       рамках экосистемы);
-    - ``roots`` — имена прямых зависимостей проекта (глубина 1).
+    - roots — имена прямых зависимостей проекта (глубина 1).
 
-    Если экосистема не позволяет получить рёбра графа, ``edges`` остаётся
+    Если экосистема не позволяет получить рёбра графа, edges остаётся
     пустым, и ограничение по глубине не применяется (см. :meth:`flat`).
     """
 
@@ -83,6 +83,36 @@ class ClosureGraph:
     def flat(cls, coords: list[DependencyCoordinate]) -> ClosureGraph:
         """Closure без известных рёбер: глубина не вычислима."""
         return cls(coords=coords, edges={}, roots=[coord.name for coord in coords])
+
+    @classmethod
+    def merged(cls, graphs: list[ClosureGraph]) -> ClosureGraph:
+        """Объединить closure нескольких проектов (например, модулей решения).
+
+        Координаты дедуплицируются по имени (первая встреченная версия
+        сохраняется), рёбра и корни объединяются без дублей. Порядок входных
+        графов должен быть детерминированным — от него зависит результат.
+        """
+        coords: list[DependencyCoordinate] = []
+        edges: dict[str, list[str]] = {}
+        roots: list[str] = []
+        seen_coords: set[str] = set()
+        seen_roots: set[str] = set()
+        for graph in graphs:
+            for coord in graph.coords:
+                if coord.name in seen_coords:
+                    continue
+                seen_coords.add(coord.name)
+                coords.append(coord)
+            for name, deps in graph.edges.items():
+                existing = edges.setdefault(name, [])
+                for dep in deps:
+                    if dep not in existing:
+                        existing.append(dep)
+            for name in graph.roots:
+                if name not in seen_roots:
+                    seen_roots.add(name)
+                    roots.append(name)
+        return cls(coords=coords, edges=edges, roots=roots)
 
 
 # ---------------------------------------------------------------------------
@@ -165,11 +195,15 @@ class ReachabilityReport:
     ecosystem: str
     package: str
     function: str
+    #: Режим: function (конкретная функция) или package (любой код пакета).
+    mode: str = "function"
     reachable: bool = False
-    #: Код диагноза: ``reachable`` | ``not_found`` | ``no_source`` |
-    #: ``no_callers`` | ``deps_only`` | ``project_not_entrypoint``.
+    #: Код диагноза: reachable | not_found | no_source |
+    #: no_callers | deps_only | project_not_entrypoint.
     diagnosis: str = "reachable"
     target_nodes: list[NodeRef] = field(default_factory=list)
+    #: Функции пакета, достижимые из точек входа (для режима package).
+    reachable_targets: list[NodeRef] = field(default_factory=list)
     entrypoint_paths: list[EntryPointPath] = field(default_factory=list)
     dependencies: list[DependencyCoordinate] = field(default_factory=list)
     #: Статистика конвейера: packages, graph_nodes, graph_edges, boundary_links,
@@ -193,9 +227,11 @@ class ReachabilityReport:
             "ecosystem": self.ecosystem,
             "package": self.package,
             "function": self.function,
+            "mode": self.mode,
             "reachable": self.reachable,
             "diagnosis": self.diagnosis,
             "target_nodes": [node.to_dict() for node in self.target_nodes],
+            "reachable_targets": [node.to_dict() for node in self.reachable_targets],
             "entrypoint_paths": [path.to_dict() for path in self.entrypoint_paths],
             "dependencies": [dep.to_dict() for dep in self.dependencies],
             "stats": dict(self.stats),
@@ -214,10 +250,16 @@ class ReachabilityReport:
             ecosystem=str(data.get("ecosystem", "")),
             package=str(data.get("package", "")),
             function=str(data.get("function", "")),
+            mode=str(data.get("mode", "function")),
             reachable=bool(data.get("reachable", False)),
             diagnosis=str(data.get("diagnosis", "reachable")),
             target_nodes=[
                 NodeRef.from_dict(n) for n in data.get("target_nodes", []) if isinstance(n, dict)
+            ],
+            reachable_targets=[
+                NodeRef.from_dict(n)
+                for n in data.get("reachable_targets", [])
+                if isinstance(n, dict)
             ],
             entrypoint_paths=[
                 EntryPointPath.from_dict(p)

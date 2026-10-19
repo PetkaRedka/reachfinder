@@ -1,14 +1,14 @@
 """Поставщик исходников для экосистем C/C++ (Conan).
 
-Closure определяется командой ``conan graph info --format=json`` (полный граф)
-с фоллбэком на список требований из ``conanfile.txt``. Исходники получаются
+Closure определяется командой conan graph info --format=json (полный граф)
+с фоллбэком на список требований из conanfile.txt. Исходники получаются
 как:
 
-1. ``conan download <ref> --only-recipe`` — рецепт попадает в кэш;
-2. ``conan cache path <ref>`` — папка рецепта в кэше;
-3. ``conan source <папка>`` — выполняется ``source()`` рецепта (скачивание
+1. conan download <ref> --only-recipe — рецепт попадает в кэш;
+2. conan cache path <ref> — папка рецепта в кэше;
+3. conan source <папка> — выполняется source() рецепта (скачивание
    вышестоящих исходников);
-4. ``conan cache path <ref> --folder=source`` — каталог исходников, который
+4. conan cache path <ref> --folder=source — каталог исходников, который
    копируется в кэш reachfinder.
 
 C/C++ — экосистема без единого стандарта зависимостей, поэтому этот
@@ -28,7 +28,7 @@ from typing import ClassVar
 from reachfinder._cache import PkgCache
 from reachfinder._languages import CPP_ECOSYSTEM
 from reachfinder._models import ClosureGraph, DependencyCoordinate
-from reachfinder._sources import SourceError, SourceProvider
+from reachfinder._sources import SourceError, SourceProvider, cached_scip_index, resolve_tool
 
 
 class CppSourceProvider(SourceProvider):
@@ -87,6 +87,37 @@ class CppSourceProvider(SourceProvider):
 
     # ------------------------------------------------------------------
 
+    def build_scip_index(
+        self,
+        project_root: str,
+        coordinates: list[DependencyCoordinate],
+        cache_root: str,
+    ) -> str | None:
+        """Построить SCIP-индекс C/C++ (scip-clang).
+
+        Требуется база компиляции compile_commands.json (её создаёт CMake при
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON). Если индексёр или база
+        отсутствуют, возвращается None (name-based резолв).
+        """
+        tool = resolve_tool("scip-clang")
+        compdb = _find_compile_commands(Path(project_root))
+        if tool is None or compdb is None:
+            return None
+
+        def build(out_path: Path) -> bool:
+            proc = self.run(
+                [
+                    tool,
+                    f"--compdb-path={os.fspath(compdb)}",
+                    f"--index-output-path={os.fspath(out_path)}",
+                ],
+                project_root,
+                timeout=3600,
+            )
+            return proc.returncode == 0 and out_path.is_file()
+
+        return cached_scip_index(cache_root, project_root, build)
+
     def fetch(self, coord: DependencyCoordinate) -> Path:
         if self._cache.has(coord):
             return self._cache.source_dir(coord)
@@ -133,9 +164,9 @@ class CppSourceProvider(SourceProvider):
     def _locate_sources(self, ref: str, recipe_dir: str, cwd: str) -> Path | None:
         """Найти каталог исходников в кэше Conan.
 
-        Порядок: ``<recipe_dir>/src`` (source() распаковал сюда), затем
-        ``--folder=source`` (source() через отдельную папку) и, наконец,
-        ``--folder=export_source`` (исходники из ``exports_sources``).
+        Порядок: <recipe_dir>/src (source() распаковал сюда), затем
+        --folder=source (source() через отдельную папку) и, наконец,
+        --folder=export_source (исходники из exports_sources).
         """
         candidates = [Path(recipe_dir) / "src"]
         for folder in ("source", "export_source"):
@@ -153,8 +184,23 @@ class CppSourceProvider(SourceProvider):
         return lines[-1] if lines else ""
 
 
+def _find_compile_commands(root: Path) -> Path | None:
+    """Найти compile_commands.json (корень, build/, CMake-каталоги, рекурсивно)."""
+    candidates = [
+        root / "compile_commands.json",
+        root / "build" / "compile_commands.json",
+        root / "cmake-build-debug" / "compile_commands.json",
+        root / "cmake-build-release" / "compile_commands.json",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    matches = sorted(root.rglob("compile_commands.json"))
+    return matches[0] if matches else None
+
+
 def _ref_name(ref: str) -> str:
-    """Имя пакета из ссылки Conan ``name/version#revision`` (без версии/ревизии)."""
+    """Имя пакета из ссылки Conan name/version#revision (без версии/ревизии)."""
     if not ref:
         return ""
     name, _, _ = ref.split("#", 1)[0].rpartition("/")
@@ -162,7 +208,7 @@ def _ref_name(ref: str) -> str:
 
 
 def _ref_version(ref: str) -> str:
-    """Версия из ссылки Conan ``name/version#revision``."""
+    """Версия из ссылки Conan name/version#revision."""
     if not ref:
         return ""
     _, _, version = ref.split("#", 1)[0].rpartition("/")
@@ -170,12 +216,12 @@ def _ref_version(ref: str) -> str:
 
 
 def _parse_graph_json(stdout: str) -> ClosureGraph:
-    """Построить граф зависимостей из JSON ``conan graph info``.
+    """Построить граф зависимостей из JSON conan graph info.
 
-    Узлы графа нумерованы (``"0"`` — потребитель/conanfile). Поле
-    ``dependencies`` узла содержит **транзитивное** замыкание, поэтому прямые
+    Узлы графа нумерованы ("0" — потребитель/conanfile). Поле
+    dependencies узла содержит **транзитивное** замыкание, поэтому прямые
     рёбра вычисляются: прямые зависимость — те, что не достигаются через другие
-    зависимости того же узла. Корневой узел (без ``ref``) даёт корни.
+    зависимости того же узла. Корневой узел (без ref) даёт корни.
     """
     try:
         data = json.loads(stdout)

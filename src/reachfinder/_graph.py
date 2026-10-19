@@ -2,7 +2,7 @@
 
 Проект и каждая зависимость парсятся по отдельности (корень парсинга —
 каталог исходников пакета). Чтобы при объединении графов идентификаторы
-узлов из разных пакетов не пересекались (например, ``index.js`` из двух
+узлов из разных пакетов не пересекались (например, index.js из двух
 npm-пакетов), каждому подграфу присваивается уникальный префикс.
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import sys
 
 from trailmark.models import CodeEdge, CodeGraph, CodeUnit, EdgeKind, NodeKind
 
@@ -26,19 +27,29 @@ __all__ = [
     "read_attribute",
 ]
 
+# Запас на рекурсивный обход AST в trailmark (checkstyle требует >10k кадров).
+_PARSE_RECURSION_LIMIT = 100_000
+
 
 def parse_graph(path: str, language: str) -> CodeGraph:
-    """Построить граф кода каталога через trailmark."""
+    """Построить граф кода каталога через trailmark.
+
+    trailmark обходит AST рекурсивно; на глубоко вложенных файлах (например,
+    сгенерированный ANTLR-код в checkstyle) стандартного лимита Python не хватает.
+    Поднимаем его один раз перед парсингом.
+    """
     from trailmark import parse_directory
 
+    if sys.getrecursionlimit() < _PARSE_RECURSION_LIMIT:
+        sys.setrecursionlimit(_PARSE_RECURSION_LIMIT)
     return parse_directory(path, language=language)
 
 
 def prefix_graph(graph: CodeGraph, prefix: str) -> CodeGraph:
     """Переписать идентификаторы узлов графа с уникальным префиксом.
 
-    Переписываются id узлов, концы рёбер и ключи ``annotations``/``entrypoints``/
-    ``subgraphs``. Имена узлов (``name``) и пути файлов не меняются — на них
+    Переписываются id узлов, концы рёбер и ключи annotations/entrypoints/
+    subgraphs. Имена узлов (name) и пути файлов не меняются — на них
     опираются поиск целевой функции и склейка границ.
     """
     mapping = {old_id: f"{prefix}::{old_id}" for old_id in graph.nodes}
@@ -77,7 +88,7 @@ def merge_graphs(graphs: list[CodeGraph], language: str) -> CodeGraph:
 
 
 def read_attribute(node: CodeUnit, key: str) -> str:
-    """Прочитать строковый атрибут узла из кортежа ``attributes``."""
+    """Прочитать строковый атрибут узла из кортежа attributes."""
     for attr_key, attr_value in node.attributes:
         if attr_key == key:
             return str(attr_value)
@@ -90,10 +101,10 @@ def normalize_path(path: str) -> str:
 
 
 def is_under_any(path: str, normalized_roots: list[str]) -> bool:
-    """Принадлежит ли ``path`` одному из заранее нормализованных корней.
+    """Принадлежит ли path одному из заранее нормализованных корней.
 
     Корни нормализуются один раз на старте (см. :func:`normalize_path`), чтобы
-    не повторять ``abspath``/``normcase`` на каждый узел графа.
+    не повторять abspath/normcase на каждый узел графа.
     """
     norm_path = normalize_path(path)
     for root in normalized_roots:

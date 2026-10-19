@@ -33,6 +33,24 @@ _DIAGNOSIS_MESSAGES: dict[str, str] = {
     ),
 }
 
+# Диагнозы в режиме «любой код пакета»: формулировки про функции пакета в целом.
+_DIAGNOSIS_MESSAGES_PACKAGE: dict[str, str] = {
+    "reachable": "код пакета достижим из точек входа проекта.",
+    "not_found": "в исходниках пакета не найдено функций или методов.",
+    "no_source": (
+        "в исходниках пакета нет кода на целевом языке "
+        "(возможно, пакет публикует только скомпилированные артефакты)."
+    ),
+    "no_callers": (
+        "код пакета нигде не вызывается в графе "
+        "(возможен динамический вызов, рефлексия или мёртвый код)."
+    ),
+    "deps_only": "код пакета вызывают только зависимости; код проекта до него не доходит.",
+    "project_not_entrypoint": (
+        "код пакета достигают функции проекта, но ни одна из них не является точкой входа."
+    ),
+}
+
 
 def save_report(report: ReachabilityReport, output_dir: str) -> str:
     """Сохранить отчёт в JSON и вернуть путь к файлу."""
@@ -45,30 +63,45 @@ def save_report(report: ReachabilityReport, output_dir: str) -> str:
 
 def print_report(report: ReachabilityReport, logger: Logger) -> None:
     """Вывести сводку результата в консоль."""
+    package_mode = report.mode == "package"
     logger.print_console("=" * 60)
     logger.print_console("Результат анализа достижимости")
     logger.print_console("=" * 60)
     logger.print_console(f"Проект:     {report.project}")
     logger.print_console(f"Язык:       {report.language} ({report.ecosystem})")
     logger.print_console(f"Пакет:      {report.package}")
-    logger.print_console(f"Функция:    {report.function}")
+    if package_mode:
+        logger.print_console("Режим:      любой код пакета")
+    else:
+        logger.print_console(f"Функция:    {report.function}")
 
     _print_stats(report, logger)
 
     if not report.target_nodes:
         logger.print_console("Целевых определений: 0")
-        message = _DIAGNOSIS_MESSAGES.get(report.diagnosis, _DIAGNOSIS_MESSAGES["not_found"])
-        logger.print_console(f"Диагноз:   {message}")
+        logger.print_console(f"Диагноз:   {_diagnosis_message(report)}")
         return
 
     status = "ДА" if report.reachable else "НЕТ"
-    logger.print_console(f"Достижима:  {status}")
-    logger.print_console(f"Целевых определений: {len(report.target_nodes)}")
-    for node in report.target_nodes[:_MAX_PATHS_IN_CONSOLE]:
-        logger.print_console(f"  - {_short(node)}")
-    logger.print_console(
-        f"Диагноз:   {_DIAGNOSIS_MESSAGES.get(report.diagnosis, report.diagnosis)}"
-    )
+    if package_mode:
+        logger.print_console(f"Код пакета достижим: {status}")
+        logger.print_console(
+            f"Функций пакета: {len(report.target_nodes)}, "
+            f"достижимо: {len(report.reachable_targets)}"
+        )
+        if report.reachable_targets:
+            logger.print_console("Достижимые функции:")
+            for node in report.reachable_targets[:_MAX_PATHS_IN_CONSOLE]:
+                logger.print_console(f"  - {_short(node)}")
+            remainder = len(report.reachable_targets) - _MAX_PATHS_IN_CONSOLE
+            if remainder > 0:
+                logger.print_console(f"  ...и ещё {remainder}.")
+    else:
+        logger.print_console(f"Достижима:  {status}")
+        logger.print_console(f"Целевых определений: {len(report.target_nodes)}")
+        for node in report.target_nodes[:_MAX_PATHS_IN_CONSOLE]:
+            logger.print_console(f"  - {_short(node)}")
+    logger.print_console(f"Диагноз:   {_diagnosis_message(report)}")
 
     if report.entrypoint_paths:
         _print_paths(report, logger)
@@ -120,7 +153,8 @@ def _print_stats(report: ReachabilityReport, logger: Logger) -> None:
 
 def _print_paths(report: ReachabilityReport, logger: Logger) -> None:
     logger.print_console("-" * 60)
-    logger.print_console("Маршруты (точка входа -> целевая функция):")
+    target = "достижимая функция пакета" if report.mode == "package" else "целевая функция"
+    logger.print_console(f"Маршруты (точка входа -> {target}):")
     for index, route in enumerate(report.entrypoint_paths[:_MAX_PATHS_IN_CONSOLE], start=1):
         ep = route.entrypoint
         logger.print_console(f"  [{index}] {ep.name} ({ep.file_path}:{ep.start_line})")
@@ -135,15 +169,16 @@ def _print_paths(report: ReachabilityReport, logger: Logger) -> None:
 def _print_negative_evidence(report: ReachabilityReport, logger: Logger) -> None:
     """При недостижимости показать вызывающих цели и проектные «дотягивания»."""
     logger.print_console("-" * 60)
+    target = "функций пакета" if report.mode == "package" else "цели"
     if report.callers:
-        logger.print_console(f"Прямые вызывающие цели ({len(report.callers)}):")
+        logger.print_console(f"Прямые вызывающие {target} ({len(report.callers)}):")
         for node in report.callers[:_MAX_PATHS_IN_CONSOLE]:
             logger.print_console(f"  - {_short(node)}")
     else:
-        logger.print_console("Прямых вызывающих у цели нет.")
+        logger.print_console(f"Прямых вызывающих у {target} нет.")
     if report.project_reachers:
         logger.print_console(
-            f"Функции проекта, достигающие цели (но не точки входа) "
+            f"Функции проекта, достигающие {target} (но не точки входа) "
             f"({len(report.project_reachers)}):"
         )
         for node in report.project_reachers[:_MAX_PATHS_IN_CONSOLE]:
@@ -154,6 +189,14 @@ def _print_negative_evidence(report: ReachabilityReport, logger: Logger) -> None
         )
         for symbol in report.unlinked_boundaries[:_MAX_NAMES_IN_CONSOLE]:
             logger.print_console(f"  - {symbol}")
+
+
+def _diagnosis_message(report: ReachabilityReport) -> str:
+    """Текст диагноза с учётом режима анализа."""
+    messages = (
+        _DIAGNOSIS_MESSAGES_PACKAGE if report.mode == "package" else _DIAGNOSIS_MESSAGES
+    )
+    return messages.get(report.diagnosis, messages["not_found"])
 
 
 def _short(node: NodeRef) -> str:

@@ -2,12 +2,12 @@
 
 Версии берутся из локфайлов проекта в порядке приоритета:
 
-1. ``uv.lock`` / ``poetry.lock`` / ``Pipfile.lock`` — полный closure уже
+1. uv.lock / poetry.lock / Pipfile.lock — полный closure уже
    зафиксирован, дополнительное разрешение зависимостей не требуется;
-2. ``requirements.txt`` / ``pyproject.toml`` — только верхнеуровневые
-   зависимости; полный closure вычисляется через ``pip install --dry-run``.
+2. requirements.txt / pyproject.toml — только верхнеуровневые
+   зависимости; полный closure вычисляется через pip install --dry-run.
 
-Исходники одного пакета скачиваются командой ``pip download --no-deps``
+Исходники одного пакета скачиваются командой pip download --no-deps
 (предпочтительно sdist, иначе wheel) и распаковываются в кэш.
 """
 
@@ -26,7 +26,13 @@ from typing import ClassVar
 
 from reachfinder._languages import PYTHON_ECOSYSTEM
 from reachfinder._models import ClosureGraph, DependencyCoordinate
-from reachfinder._sources import SourceError, SourceProvider, extract_archive
+from reachfinder._sources import (
+    SourceError,
+    SourceProvider,
+    cached_scip_index,
+    extract_archive,
+    resolve_tool,
+)
 
 # Архивы, которые pip download может оставить после загрузки.
 _ARCHIVE_SUFFIXES = (".whl", ".tar.gz", ".tgz", ".tar.bz2", ".zip")
@@ -67,7 +73,7 @@ class PythonSourceProvider(SourceProvider):
 
     @staticmethod
     def _parse_lock_toml(path: Path) -> list[DependencyCoordinate]:
-        """Разобрать ``[[package]] name/version`` из uv.lock или poetry.lock."""
+        """Разобрать [[package]] name/version из uv.lock или poetry.lock."""
         with open(path, "rb") as fh:
             data = tomllib.load(fh)
 
@@ -92,27 +98,30 @@ class PythonSourceProvider(SourceProvider):
 
     @staticmethod
     def _parse_pipfile_lock(path: Path) -> list[DependencyCoordinate]:
-        """Разобрать closure из Pipfile.lock (секции default и develop)."""
+        """Разобрать closure из Pipfile.lock (секция default).
+
+        develop — dev-зависимости (линтеры, тесты); для достижимости
+        уязвимостей они не нужны и только замедляют скачивание.
+        """
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
 
         coords: list[DependencyCoordinate] = []
         seen: set[str] = set()
-        for section in ("default", "develop"):
-            for name, spec in (data.get(section) or {}).items():
-                if not isinstance(spec, dict):
-                    continue
-                version = _parse_pipfile_version(str(spec.get("version", "")))
-                if not version or name in seen:
-                    continue
-                seen.add(name)
-                coords.append(
-                    DependencyCoordinate(
-                        ecosystem=PYTHON_ECOSYSTEM,
-                        name=name,
-                        version=version,
-                    )
+        for name, spec in (data.get("default") or {}).items():
+            if not isinstance(spec, dict) or name in seen:
+                continue
+            version = _parse_pipfile_version(str(spec.get("version", "")))
+            if not version:
+                continue
+            seen.add(name)
+            coords.append(
+                DependencyCoordinate(
+                    ecosystem=PYTHON_ECOSYSTEM,
+                    name=name,
+                    version=version,
                 )
+            )
         return coords
 
     @staticmethod
@@ -147,7 +156,7 @@ class PythonSourceProvider(SourceProvider):
         return specs
 
     def _pip_report(self, project_root: str, specs: list[str]) -> dict:
-        """Разрешить полный closure через ``pip install --dry-run --report``."""
+        """Разрешить полный closure через pip install --dry-run --report."""
         with tempfile.TemporaryDirectory() as tmp:
             report_path = os.path.join(tmp, "report.json")
             cmd = [
@@ -169,6 +178,45 @@ class PythonSourceProvider(SourceProvider):
     # ------------------------------------------------------------------
     # Получение исходников
     # ------------------------------------------------------------------
+
+    def build_scip_index(
+        self,
+        project_root: str,
+        coordinates: list[DependencyCoordinate],
+        cache_root: str,
+    ) -> str | None:
+        """Построить SCIP-индекс Python (scip-python).
+
+        scip-python анализирует код вместе с окружением Python, поэтому
+        зависимости проекта должны быть установлены (venv/сайт-пакеты). Если
+        индексёр недоступен (на Windows он падает из-за бага с path.sep)
+        или окружение не найдено, возвращается None — используется
+        name-based резолв.
+        """
+        tool = resolve_tool("scip-python")
+        if tool is None:
+            return None
+        project_name = os.path.basename(project_root.rstrip("/\\")) or "project"
+
+        def build(out_path: Path) -> bool:
+            proc = self.run(
+                [
+                    tool,
+                    "index",
+                    "--cwd",
+                    project_root,
+                    "--project-name",
+                    project_name,
+                    "--output",
+                    os.fspath(out_path),
+                    "--quiet",
+                ],
+                project_root,
+                timeout=3600,
+            )
+            return proc.returncode == 0 and out_path.is_file()
+
+        return cached_scip_index(cache_root, project_root, build)
 
     def fetch(self, coord: DependencyCoordinate) -> Path:
         if self._cache.has(coord):
@@ -290,10 +338,10 @@ def _pyproject_dep_names(root: Path) -> list[str]:
 
 
 def _pip_graph(report: dict) -> ClosureGraph:
-    """Построить граф зависимостей из отчёта ``pip install --dry-run --report``.
+    """Построить граф зависимостей из отчёта pip install --dry-run --report.
 
-    Корневые зависимости помечены в отчёте флагом ``requested``, а рёбра берутся
-    из ``metadata.requires_dist`` каждого пакета.
+    Корневые зависимости помечены в отчёте флагом requested, а рёбра берутся
+    из metadata.requires_dist каждого пакета.
     """
     coords: list[DependencyCoordinate] = []
     edges: dict[str, list[str]] = {}
@@ -328,7 +376,7 @@ def _pip_graph(report: dict) -> ClosureGraph:
 
 
 def _requirement_name(spec: str) -> str:
-    """Извлечь имя пакета из PEP 508-спецификатора (``requests (>=2); extra=='x'``)."""
+    """Извлечь имя пакета из PEP 508-спецификатора (requests (>=2); extra=='x')."""
     if not isinstance(spec, str) or not spec.strip():
         return ""
     return re.split(r"[<>=!~;\s\[(]", spec.strip(), maxsplit=1)[0].strip()
@@ -348,7 +396,7 @@ def _is_registry_package(package: dict) -> bool:
 
 
 def _parse_pipfile_version(raw: str) -> str:
-    """Выделить версию из строки вида ``==2.25.1``."""
+    """Выделить версию из строки вида ==2.25.1."""
     match = re.search(r"(\d[^\s]*)", raw)
     return match.group(1) if match else ""
 
@@ -356,7 +404,7 @@ def _parse_pipfile_version(raw: str) -> str:
 def _parse_requirements(path: Path) -> list[str]:
     """Разобрать requirements-файл в список спецификаторов.
 
-    Учитываются комментарии, ``-r``/``--requirement``-включения, ``-e``
+    Учитываются комментарии, -r/--requirement-включения, -e
     (editable, пропускаются) и PEP 508-строки с URL (оставляем имя).
     """
     specs: list[str] = []
@@ -394,9 +442,9 @@ def _find_archive(dest: Path) -> Path | None:
 def _pip_command() -> list[str]:
     """Вернуть префикс команды pip (учёт uv-окружений без модуля pip).
 
-    В окружениях, созданных ``uv venv``, модуль ``pip`` по умолчанию не
-    устанавливается. Предпочитаем ``python -m pip`` текущего интерпретатора,
-    иначе — ``pip`` из PATH, иначе — понятная ошибка.
+    В окружениях, созданных uv venv, модуль pip по умолчанию не
+    устанавливается. Предпочитаем python -m pip текущего интерпретатора,
+    иначе — pip из PATH, иначе — понятная ошибка.
     """
     if importlib.util.find_spec("pip") is not None:
         return [sys.executable, "-m", "pip"]
@@ -412,10 +460,10 @@ def _pip_command() -> list[str]:
 def _top_source_dir(extract_root: Path) -> Path:
     """Вернуть каталог с исходниками пакета из корня распаковки.
 
-    sdist раскрывается в единственный каталог ``<имя>-<версия>/`` — его и
+    sdist раскрывается в единственный каталог <имя>-<версия>/ — его и
     возвращаем, чтобы модульные идентификаторы trailmark были консистентны.
     wheel раскрывается в корень с несколькими элементами (пакет/модуль +
-    ``<имя>-<версия>.dist-info/``) — тогда возвращаем сам корень.
+    <имя>-<версия>.dist-info/) — тогда возвращаем сам корень.
     """
     entries = list(extract_root.iterdir())
     if len(entries) == 1 and entries[0].is_dir():

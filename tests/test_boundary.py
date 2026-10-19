@@ -147,6 +147,80 @@ def test_disambiguates_namespaced_receiver(make_unit, make_graph) -> None:
     assert any(edge.target_id == "a::Top.Call" for edge in graph.edges)
 
 
+def test_disambiguates_by_package_id_without_name_in_path(make_unit, make_graph) -> None:
+    graph = make_graph(
+        [
+            make_unit(
+                "project::lib.monitor.watch:watch",
+                "watch",
+                NodeKind.FUNCTION,
+                file_path="/project/lib/monitor/watch.js",
+            ),
+            make_unit(
+                "project::proxy.unresolved:chokidar.watch",
+                "chokidar.watch",
+                NodeKind.PROXY,
+                file_path="/project/lib/monitor/watch.js",
+                attributes=(("raw_symbol", "chokidar.watch"),),
+            ),
+            make_unit(
+                "chokidar@3.5.3::index:watch",
+                "watch",
+                NodeKind.FUNCTION,
+                file_path="/cache/js/src/1a2726b724758666/index.js",
+            ),
+        ]
+    )
+    _proxy_edge(
+        graph,
+        "project::lib.monitor.watch:watch",
+        "project::proxy.unresolved:chokidar.watch",
+    )
+
+    added = link_boundaries(graph)
+
+    # Каталог кэша npm-пакета не содержит имени пакета, но оно есть в id узла.
+    assert added == 1
+    assert any(edge.target_id == "chokidar@3.5.3::index:watch" for edge in graph.edges)
+
+
+def test_disambiguates_go_module_by_receiver_package(make_unit, make_graph) -> None:
+    graph = make_graph(
+        [
+            make_unit("project::main", "main", NodeKind.FUNCTION, file_path="/project/main.go"),
+            make_unit(
+                "project::proxy.unresolved:tcell.NewScreen",
+                "tcell.NewScreen",
+                NodeKind.PROXY,
+                file_path="/project/main.go",
+                attributes=(("raw_symbol", "tcell.NewScreen"),),
+            ),
+            make_unit(
+                "github.com/gdamore/tcell/v2@v2.1.0::screen:NewScreen",
+                "NewScreen",
+                NodeKind.FUNCTION,
+                file_path="/cache/go/src/abc/screen.go",
+            ),
+            make_unit(
+                "example.com/other@v1.0.0::screen:NewScreen",
+                "NewScreen",
+                NodeKind.FUNCTION,
+                file_path="/cache/go/src/def/screen.go",
+            ),
+        ]
+    )
+    _proxy_edge(graph, "project::main", "project::proxy.unresolved:tcell.NewScreen")
+
+    added = link_boundaries(graph)
+
+    # receiver tcell берётся из пути Go-модуля, а не из каталога кэша.
+    assert added == 1
+    assert any(
+        edge.target_id == "github.com/gdamore/tcell/v2@v2.1.0::screen:NewScreen"
+        for edge in graph.edges
+    )
+
+
 @pytest.mark.parametrize(
     ("raw", "member", "receiver"),
     [

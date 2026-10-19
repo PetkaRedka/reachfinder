@@ -2,17 +2,36 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from trailmark.analysis.entrypoints import detect_entrypoints
-from trailmark.models import NodeKind
+from trailmark.models import (
+    CodeEdge,
+    CodeGraph,
+    CodeUnit,
+    EdgeConfidence,
+    EdgeKind,
+    NodeKind,
+)
 from trailmark.storage.graph_store import GraphStore
 
 from reachfinder._boundary import link_boundaries
 from reachfinder._graph import merge_graphs, parse_graph, prefix_graph
 from reachfinder._models import NodeRef
-from reachfinder._reachability import _conventional_entrypoints, _diagnose
+from reachfinder._reachability import (
+    _conventional_entrypoints,
+    _diagnose,
+    _forward_calls_adjacency,
+    _forward_reachable,
+    _package_entrypoints,
+    _reconstruct_forward_path,
+    _reconstruct_path,
+    _reverse_calls_adjacency,
+    _reverse_reachable,
+    _reverse_shortest_tree,
+)
 from reachfinder._target import find_target_nodes
 
 
@@ -110,6 +129,41 @@ def test_conventional_entrypoints_skip_already_detected(make_unit, make_graph) -
     assert _conventional_entrypoints(graph, {"app:main"}) == []
 
 
+def test_package_entrypoints_js(tmp_path: Path, make_unit, make_graph) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"bin": {"cli": "./bin/cli.js"}, "main": "./lib"}',
+        encoding="utf-8",
+    )
+    graph = make_graph(
+        [
+            make_unit(
+                "bin.cli",
+                "bin.cli",
+                NodeKind.MODULE,
+                file_path=str(tmp_path / "bin" / "cli.js"),
+            ),
+            make_unit(
+                "lib.index",
+                "lib.index",
+                NodeKind.MODULE,
+                file_path=str(tmp_path / "lib" / "index.js"),
+            ),
+            make_unit(
+                "app:main",
+                "main",
+                NodeKind.FUNCTION,
+                file_path=str(tmp_path / "app.py"),
+            ),
+        ]
+    )
+
+    assert set(_package_entrypoints(graph, str(tmp_path), "javascript")) == {
+        "bin.cli",
+        "lib.index",
+    }
+    assert _package_entrypoints(graph, str(tmp_path), "python") == []
+
+
 @pytest.mark.parametrize(
     ("reachable", "has_ancestors", "has_project", "expected"),
     [
@@ -129,3 +183,204 @@ def test_diagnose(
     project = [NodeRef(node_id="p", name="p")] if has_project else []
 
     assert _diagnose(reachable, ancestors, project) == expected
+
+
+def _add_calls(
+    make_graph: Callable[..., CodeGraph],
+    units: list[CodeUnit],
+    edges: list[tuple[str, str]],
+) -> CodeGraph:
+    """Собрать граф с рёбрами CALLS для тестов обхода."""
+    graph = make_graph(units)
+    for src, dst in edges:
+        graph.edges.append(
+            CodeEdge(
+                source_id=src,
+                target_id=dst,
+                kind=EdgeKind.CALLS,
+                confidence=EdgeConfidence.INFERRED,
+            )
+        )
+    return graph
+
+
+def test_reverse_shortest_tree_gives_shortest_witness(make_unit, make_graph) -> None:
+    graph = _add_calls(
+        make_graph,
+        [
+            make_unit("project:main", "main"),
+            make_unit("project:a", "a"),
+            make_unit("project:b", "b"),
+            make_unit("dep:vuln", "vuln"),
+        ],
+        [
+            ("project:main", "project:a"),
+            ("project:a", "dep:vuln"),
+            ("project:main", "project:b"),
+        ],
+    )
+
+    reverse = _reverse_calls_adjacency(graph)
+    next_hop = _reverse_shortest_tree(reverse, "dep:vuln", max_depth=20)
+
+    assert set(next_hop) == {"dep:vuln", "project:a", "project:main"}
+    assert next_hop["dep:vuln"] is None
+    assert _reconstruct_path(next_hop, "project:main") == [
+        "project:main",
+        "project:a",
+        "dep:vuln",
+    ]
+
+
+def test_reverse_shortest_tree_respects_depth(make_unit, make_graph) -> None:
+    graph = _add_calls(
+        make_graph,
+        [
+            make_unit("project:main", "main"),
+            make_unit("project:a", "a"),
+            make_unit("dep:vuln", "vuln"),
+        ],
+        [("project:main", "project:a"), ("project:a", "dep:vuln")],
+    )
+
+    reverse = _reverse_calls_adjacency(graph)
+    next_hop = _reverse_shortest_tree(reverse, "dep:vuln", max_depth=1)
+
+    # За один шаг от цели достижим только project:a, project:main — уже нет.
+    assert set(next_hop) == {"dep:vuln", "project:a"}
+
+
+def test_reverse_calls_adjacency_ignores_non_call_edges(make_unit, make_graph) -> None:
+    graph = make_graph([make_unit("a", "a"), make_unit("b", "b")])
+    graph.edges.append(
+        CodeEdge(
+            source_id="a",
+            target_id="b",
+            kind=EdgeKind.IMPORTS,
+            confidence=EdgeConfidence.INFERRED,
+        )
+    )
+
+    assert _reverse_calls_adjacency(graph) == {}
+
+
+def test_forward_calls_adjacency_ignores_non_call_edges(make_unit, make_graph) -> None:
+    graph = make_graph([make_unit("a", "a"), make_unit("b", "b")])
+    graph.edges.append(
+        CodeEdge(
+            source_id="a",
+            target_id="b",
+            kind=EdgeKind.IMPORTS,
+            confidence=EdgeConfidence.INFERRED,
+        )
+    )
+
+    assert _forward_calls_adjacency(graph) == {}
+
+
+def test_forward_reachable_finds_package_targets(make_unit, make_graph) -> None:
+    graph = _add_calls(
+        make_graph,
+        [
+            make_unit("project:main", "main"),
+            make_unit("project:a", "a"),
+            make_unit("dep:one", "one"),
+            make_unit("dep:two", "two"),
+        ],
+        [
+            ("project:main", "project:a"),
+            ("project:a", "dep:one"),
+            ("project:a", "dep:two"),
+        ],
+    )
+
+    forward = _forward_calls_adjacency(graph)
+    depths, parents = _forward_reachable(forward, ["project:main"], max_depth=20)
+
+    assert set(depths) == {"project:main", "project:a", "dep:one", "dep:two"}
+    assert depths["dep:one"] == 2
+    assert depths["dep:two"] == 2
+    assert _reconstruct_forward_path(parents, "dep:one") == [
+        "project:main",
+        "project:a",
+        "dep:one",
+    ]
+
+
+def test_forward_reachable_respects_depth(make_unit, make_graph) -> None:
+    graph = _add_calls(
+        make_graph,
+        [
+            make_unit("project:main", "main"),
+            make_unit("dep:one", "one"),
+            make_unit("dep:two", "two"),
+        ],
+        [("project:main", "dep:one"), ("dep:one", "dep:two")],
+    )
+
+    forward = _forward_calls_adjacency(graph)
+    depths, _parents = _forward_reachable(forward, ["project:main"], max_depth=1)
+
+    assert set(depths) == {"project:main", "dep:one"}
+
+
+def test_forward_reachable_multiple_entrypoints(make_unit, make_graph) -> None:
+    graph = _add_calls(
+        make_graph,
+        [
+            make_unit("project:main", "main"),
+            make_unit("project:worker", "worker"),
+            make_unit("dep:one", "one"),
+        ],
+        [
+            ("project:main", "dep:one"),
+            ("project:worker", "dep:one"),
+        ],
+    )
+
+    forward = _forward_calls_adjacency(graph)
+    depths, parents = _forward_reachable(forward, ["project:main", "project:worker"], 20)
+
+    assert depths["dep:one"] == 1
+    assert parents["dep:one"] in {"project:main", "project:worker"}
+    assert parents["project:main"] is None
+    assert parents["project:worker"] is None
+
+
+def test_reverse_reachable_collects_ancestors(make_unit, make_graph) -> None:
+    graph = _add_calls(
+        make_graph,
+        [
+            make_unit("project:main", "main"),
+            make_unit("project:a", "a"),
+            make_unit("dep:one", "one"),
+            make_unit("dep:two", "two"),
+        ],
+        [
+            ("project:main", "project:a"),
+            ("project:a", "dep:one"),
+            ("dep:two", "dep:one"),
+        ],
+    )
+
+    reverse = _reverse_calls_adjacency(graph)
+    reachers = _reverse_reachable(reverse, {"dep:one"}, max_depth=20)
+
+    assert reachers == {"dep:one", "project:a", "project:main", "dep:two"}
+
+
+def test_reverse_reachable_respects_depth(make_unit, make_graph) -> None:
+    graph = _add_calls(
+        make_graph,
+        [
+            make_unit("project:main", "main"),
+            make_unit("project:a", "a"),
+            make_unit("dep:one", "one"),
+        ],
+        [("project:main", "project:a"), ("project:a", "dep:one")],
+    )
+
+    reverse = _reverse_calls_adjacency(graph)
+    reachers = _reverse_reachable(reverse, {"dep:one"}, max_depth=1)
+
+    assert reachers == {"dep:one", "project:a"}
