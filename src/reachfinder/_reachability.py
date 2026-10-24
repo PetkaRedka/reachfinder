@@ -43,6 +43,7 @@ from reachfinder._models import (
     NodeRef,
     ReachabilityReport,
 )
+from reachfinder._names import find_coordinate
 from reachfinder._scip import ScipIndex, load_index
 from reachfinder._sources import SourceError, SourceProvider, get_provider
 from reachfinder._target import find_package_nodes, find_target_nodes, to_node_ref
@@ -414,18 +415,8 @@ def _find_coordinate(
     package: str,
     ecosystem: str,
 ) -> DependencyCoordinate:
-    """Найти координату целевого пакета по имени (регистронезависимо)."""
-    needle = package.strip().lower()
-    for coord in coords:
-        name = coord.name.lower()
-        if name == needle:
-            return coord
-        # Для Maven/NuGet допускаем ввод только имени артефакта (без group).
-        if ":" in coord.name and coord.name.rsplit(":", 1)[-1].lower() == needle:
-            return coord
-    raise SourceError(
-        f"Пакет '{package}' не найден в closure зависимостей экосистемы '{ecosystem}'."
-    )
+    """Найти координату целевого пакета по имени (см. :mod:`reachfinder._names`)."""
+    return find_coordinate(coords, package, ecosystem)
 
 
 def _graph_prefix(coord: DependencyCoordinate) -> str:

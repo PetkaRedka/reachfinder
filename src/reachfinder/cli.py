@@ -32,7 +32,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "reach", help="Проверить достижимость функции пакета из точек входа проекта"
     )
     reach.add_argument("--project", required=True, help="Путь к исходному коду проекта")
-    reach.add_argument("--package", required=True, help="Имя пакета-зависимости")
+    reach.add_argument(
+        "--package",
+        required=True,
+        help=(
+            "Имя пакета-зависимости. Допускаются привычные формы: "
+            "module/v4, name@version, group:artifact, name/version"
+        ),
+    )
     reach.add_argument(
         "--function",
         default=None,

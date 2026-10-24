@@ -146,7 +146,8 @@ reachfinder deps --project . --download
 Аргументы `reach`:
 
 - `--project` — путь к исходному коду проекта;
-- `--package` — имя пакета-зависимости (как в локфайле);
+- `--package` — имя пакета-зависимости; привычные формы (`module/v4`, `name@version`,
+  `group:artifact`, `name/version`) нормализуются автоматически;
 - `--function` — имя функции или метода (`Class.method`). **Необязательный**:
   если не задан, проверяется достижимость любого кода пакета;
 - `--language` — язык (`auto` по умолчанию);
@@ -233,7 +234,20 @@ reachfinder reach --project . --package requests --function get --offline
 | C# | ID пакета NuGet | `Newtonsoft.Json` |
 | C/C++ | имя рецепта Conan | `zlib`, `demoa` |
 
-Версия берётся из локфайла; указывать её в `--package` не нужно.
+Версия берётся из локфайла; указывать её в `--package` не нужно. Имя можно
+писать в привычной для экосистемы форме — reachfinder нормализует его:
+
+- **Go**: `github.com/bmatcuk/doublestar` найдёт модуль
+  `github.com/bmatcuk/doublestar/v4`; короткое `doublestar` тоже работает, если
+  оно однозначно; допустим и `module@version`;
+- **Java**: `group:artifact`, только `artifact` или `group:artifact:version`;
+- **Python**: имена канонизируются по PEP 503 (`python_dateutil` ≡
+  `python-dateutil`), можно `package==version` и extras (`package[extra]`);
+- **JS/TS**: `name@version`, включая scoped-пакеты (`@scope/pkg@1.0.0`);
+- **C# / C++**: `name` или `name/version`.
+
+Если имени соответствует несколько пакетов, выводится ошибка со списком
+кандидатов; если пакет не найден — подсказка с похожими именами из closure.
 
 ### Python
 
