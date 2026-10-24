@@ -93,6 +93,7 @@ class SourceProvider(ABC):
         cmd: list[str],
         cwd: str,
         timeout: int | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Запустить внешнюю команду и вернуть её результат.
 
@@ -100,6 +101,8 @@ class SourceProvider(ABC):
         позволяет находить npm/mvn (это .cmd-обёртки, а не .exe).
 
         :param timeout: таймаут в секундах (по умолчанию default_timeout).
+        :param extra_env: дополнительные переменные окружения (например,
+            ``GOPROXY=off`` для офлайн-проверки модульного кэша).
         :raises SourceError: если исполняемый файл не найден.
         """
         if timeout is None:
@@ -115,6 +118,8 @@ class SourceProvider(ABC):
         # PYTHONUTF8 заставляет Python-утилиты (conan, pip) писать пути в UTF-8,
         # иначе пути с не-ASCII символами искажаются.
         env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+        if extra_env:
+            env.update(extra_env)
         try:
             return subprocess.run(  # noqa: S603 — намеренный запуск пакетного менеджера
                 resolved,

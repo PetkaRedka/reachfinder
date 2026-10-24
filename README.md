@@ -291,6 +291,14 @@ reachfinder reach --project ./project \
 (они копируются в кэш напрямую). Для офлайна заранее выполните
 `go mod download all`, чтобы модульный кэш был заполнен.
 
+Проекты с каталогом `vendor/` поддерживаются отдельно: `go list` запускается с
+`-mod=readonly`, чтобы обойти ошибку `can't compute 'all' using the vendor
+directory`, а если модульный кэш недоступен — состав зависимостей берётся из
+`vendor/modules.txt`, и исходники копируются прямо из `vendor/<module>`. Это
+работает без сети. Рёбра для `--package-depth` в vendored-режиме могут быть
+неизвестны (тогда ограничение по глубине не применяется и в лог пишется
+предупреждение).
+
 ### JavaScript / TypeScript
 
 Что должно быть в проекте: `package-lock.json`, `pnpm-lock.yaml` или `yarn.lock`
@@ -534,7 +542,7 @@ print(f"Цель недостижима ({report.diagnosis}) — риска эк
 | Язык | Откуда берётся closure | Рёбра для `--package-depth` |
 | --- | --- | --- |
 | Python | `uv.lock`, `poetry.lock`, `Pipfile.lock`, `requirements*.txt`, `pyproject.toml` | зависимости из lock-файлов (где есть) |
-| Go | `go list -m -f ... all` + `go.sum` | `go mod graph` |
+| Go | `go list -mod=readonly -m ... all` (для `vendor/` — `vendor/modules.txt`) | `go mod graph` (best-effort) |
 | JS/TS | `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `package.json` | да (кроме случаев без рёбер) |
 | Java | `mvn dependency:tree` | дерево Maven |
 | C# | `obj/project.assets.json` / `packages.lock.json` всех проектов решения | `targets.*.dependencies` |
